@@ -2,7 +2,7 @@
 
 FlowGuard is a small static analyzer for Python. It reads source code and looks for a few kinds of risky data flow. It does not run the program it analyzes.
 
-This repository is milestone 1. The parser works. Taint tracking and security findings do not work yet.
+The parser and basic taint tracking work. Security findings do not work yet. The command line still prints a parse summary and does not list tainted names.
 
 ## What this version does
 
@@ -12,16 +12,20 @@ Given a Python file, FlowGuard:
 2. Parses it with Python's built-in `ast` module.
 3. Lists simple variable assignments and function calls, with line numbers.
 4. Prints that summary as text or JSON.
+5. Can track tainted names inside one scope through `trace_assignments()`. A scope is the module, one function, or one class body.
 
 An **abstract syntax tree (AST)** is a structured version of the source. `backup = secret` becomes an assignment whose target is `backup` and whose value is the name `secret`. FlowGuard walks that tree instead of executing the file.
+
+**Taint** means a label on a value that came from a configured source such as `os.getenv()` or `input()`. `backup = secret` copies the label. `secret = "public"` removes it from `secret` for later lines in that same scope.
 
 A successful parse is not a security result. The report says `Security findings: not checked yet.` JSON output has no `findings` field, because an empty list would look like "nothing risky was found."
 
 ## What this version does not do
 
-- It does not follow a value from `os.getenv()` through `backup = secret` to `print()`.
+- It does not report a vulnerability when a tainted name reaches `print()` or `subprocess.run()`.
 - It does not decide that a file is safe or unsafe.
-- It does not apply the rules below to real code yet. The rules are written down so the next milestones have a fixed list.
+- It does not apply the rules below as findings yet. The taint engine only reads their source names.
+- It does not follow a name across functions, parameters, closures, or `global`.
 - It does not execute, exploit, or rewrite the target file.
 
 ## Planned rules
@@ -44,9 +48,9 @@ FlowGuard/
 ├── flowguard.py                 # command-line entry point
 ├── flowguard/
 │   ├── __init__.py              # package version
-│   ├── parser.py                # AST extraction (implemented)
-│   ├── taint_engine.py          # assignment tracking (not implemented)
-│   ├── rules.py                 # rule definitions (not applied yet)
+│   ├── parser.py                # AST extraction, including scope labels
+│   ├── taint_engine.py          # assignment tracking inside one scope
+│   ├── rules.py                 # rule definitions (not applied as findings yet)
 │   └── reporter.py              # text and JSON for the parse summary
 ├── tests/
 │   ├── __init__.py              # makes tests importable
@@ -103,7 +107,6 @@ FlowGuard
 File: tests\samples\vulnerable_secret.py
 Parsed assignments: 2
 Parsed function calls: 2
-Taint analysis is not implemented yet.
 Security findings: not checked yet.
 
 Assignments:
@@ -129,7 +132,7 @@ Recorded assignments:
 - `secret: str = ...` is recorded. `secret: str` without a value is not.
 - `secret += extra` is recorded as `augassign`.
 - `a = b = value` records both `a` and `b`.
-- Two assignments to the same name are both kept, including the same name in two different functions. The parser does not decide which write is current and does not track scope.
+- Two assignments to the same name are both kept. Each one has a `scope` such as `<module>` or `load:4`. The parser does not decide which write is the current value. The taint engine does that inside one scope.
 
 Recorded calls include positional arguments and keywords. `subprocess.run(user_input, shell=True)` keeps the argument `user_input` and the keyword `shell=True`. Calls nested inside other calls are listed outer call first.
 
@@ -163,12 +166,28 @@ python -m unittest discover -s tests -t . -v
 
 The parser tests include a file that would create a marker file if it were executed. The test fails if that marker appears.
 
+## Taint tracking
+
+`trace_assignments(parse_result)` walks each scope from top to bottom. The configured sources come from the rule table: `os.getenv`, `os.environ.get`, and `input`.
+
+```python
+secret = os.getenv("API_KEY")  # secret is tainted
+backup = secret                # backup is tainted; path is secret -> backup
+secret = "public"              # secret is no longer tainted; backup still is
+message = "hello"              # message is not tainted
+```
+
+A function named `load` on line 4 has scope `load:4`. A nested function is `outer:1.inner:3`. Names in those scopes are not the same variable.
+
+These cases are reported as unsupported instead of being called safe or tainted:
+
+- A call that is not a configured source, such as `wrapped = str(secret)`.
+- A right-hand side that is not a simple name, constant, or direct call, such as `os.getenv("API_KEY") or "missing"`.
+- A copy from a name that was never assigned in that same scope. Parameters, closure reads, and names from another function fall here.
+- An assignment covered by `global` or `nonlocal`. The engine does not move that value into the other scope.
+
+Unpacking, attribute assignment, and `getenv()` after `from os import getenv` keep the parser limits above. `getenv()` is not treated as `os.getenv`.
+
 ## Next milestone
 
-Milestone 2 is basic taint tracking:
-
-- Mark values that come from the configured source calls.
-- Copy that mark through direct assignments and aliases such as `backup = secret`.
-- When the same name is assigned again, stop treating the old value as the current one inside the scope we choose.
-- Do not report a finding for an unrelated variable.
-- Keep scope limits explicit where the engine cannot follow the value accurately.
+Milestone 3 is to turn a tracked path into a finding when a tainted value reaches a configured destination such as `print()` or `subprocess.run()` in the same scope. A finding will stay a potential risk, with the rule id, severity, path, and a recommended fix.

@@ -61,6 +61,7 @@ class ParseSourceTests(unittest.TestCase):
         self.assertEqual(result.assignments[0].target, "secret")
         self.assertEqual(result.assignments[0].value_kind, "augassign")
         self.assertEqual(result.assignments[0].value_repr, "extra")
+        self.assertEqual(result.assignments[0].operand_kind, "name")
 
     def test_alias_is_recorded_as_a_name_copy(self) -> None:
         result = parse_source("backup = secret\n")
@@ -141,6 +142,32 @@ class ParseSourceTests(unittest.TestCase):
 
         self.assertEqual(result.assignments, ())
         self.assertEqual(result.calls, ())
+
+    def test_function_scopes_stay_separate_from_the_module(self) -> None:
+        source = "\n".join(
+            [
+                "secret = os.getenv('API_KEY')",
+                "def load(token=os.getenv('TOKEN')):",
+                "    secret = input()",
+            ]
+        )
+        result = parse_source(source)
+
+        self.assertEqual(result.assignments[0].scope, "<module>")
+        self.assertEqual(result.assignments[1].scope, "load:2")
+        default_call = next(
+            call for call in result.calls if call.arguments == ("'TOKEN'",)
+        )
+        self.assertEqual(default_call.scope, "<module>")
+        body_call = next(call for call in result.calls if call.name == "input")
+        self.assertEqual(body_call.scope, "load:2")
+
+    def test_augmented_call_keeps_the_operand_kind(self) -> None:
+        result = parse_source("secret += input()\n")
+
+        self.assertEqual(result.assignments[0].value_kind, "augassign")
+        self.assertEqual(result.assignments[0].operand_kind, "call")
+        self.assertEqual(result.assignments[0].value_repr, "input")
 
     def test_syntax_error_includes_the_line_number(self) -> None:
         with self.assertRaises(FlowGuardSyntaxError) as caught:
@@ -223,8 +250,8 @@ class CommandLineTests(unittest.TestCase):
         completed = _run_cli(SAMPLES / "vulnerable_secret.py")
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("Taint analysis is not implemented yet.", completed.stdout)
         self.assertIn("Security findings: not checked yet.", completed.stdout)
+        self.assertNotIn("Taint analysis is not implemented yet.", completed.stdout)
         self.assertIn("backup = secret (name)", completed.stdout)
         self.assertEqual(completed.stderr, "")
 

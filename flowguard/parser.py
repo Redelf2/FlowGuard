@@ -44,12 +44,19 @@ class Assignment:
     - ``constant``: a literal such as ``"public"`` or ``1``
     - ``augassign``: an update such as ``secret += extra``
     - ``other``: a shape this version only labels, such as a list or lambda
+
+    ``scope`` says where the assignment is written. ``<module>`` is the file
+    body. A function or class adds its name and line, such as ``load:4``.
+    ``operand_kind`` is set for ``+=`` so ``secret += extra`` (a name) stays
+    distinct from ``secret += input()`` (a call).
     """
 
     target: str
     line: int
     value_kind: str
     value_repr: str
+    scope: str = "<module>"
+    operand_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,21 @@ class FunctionCall:
     line: int
     arguments: tuple[str, ...]
     keywords: tuple[KeywordArgument, ...]
+    scope: str = "<module>"
+
+
+@dataclass(frozen=True)
+class NameDeclaration:
+    """A ``global`` or ``nonlocal`` name.
+
+    These statements tell Python that a name belongs to another scope.
+    FlowGuard records them so taint tracking does not pretend the name is local.
+    """
+
+    scope: str
+    name: str
+    kind: str
+    line: int
 
 
 @dataclass(frozen=True)
@@ -75,14 +97,14 @@ class ParseResult:
     """Facts collected from one source file.
 
     The same variable name can appear more than once. This object does not
-    decide which assignment is the current value, and it does not decide
-    whether two functions share a variable. That is taint tracking, which is
-    not done here.
+    decide which assignment is the current value. ``scope`` keeps one
+    function separate from another. The taint engine makes that decision.
     """
 
     path: str
     assignments: tuple[Assignment, ...]
     calls: tuple[FunctionCall, ...]
+    declarations: tuple[NameDeclaration, ...] = ()
 
 
 def parse_file(path: str | Path) -> ParseResult:
@@ -129,6 +151,7 @@ def parse_source(source: str, path: str = "<string>") -> ParseResult:
         path=path,
         assignments=tuple(collector.assignments),
         calls=tuple(collector.calls),
+        declarations=tuple(collector.declarations),
     )
 
 
@@ -181,6 +204,92 @@ class _StructureCollector(ast.NodeVisitor):
     def __init__(self) -> None:
         self.assignments: list[Assignment] = []
         self.calls: list[FunctionCall] = []
+        self.declarations: list[NameDeclaration] = []
+        self._scopes: list[str] = ["<module>"]
+
+    def _scope(self) -> str:
+        return self._scopes[-1]
+
+    def _push_scope(self, name: str, line: int) -> None:
+        label = f"{name}:{line}"
+        parent = self._scopes[-1]
+        if parent == "<module>":
+            self._scopes.append(label)
+        else:
+            self._scopes.append(f"{parent}.{label}")
+
+    def _pop_scope(self) -> None:
+        self._scopes.pop()
+
+    def _record_assignment(
+        self,
+        line: int,
+        target: str,
+        value_kind: str,
+        value_repr: str,
+        operand_kind: str = "",
+    ) -> None:
+        self.assignments.append(
+            Assignment(
+                target=target,
+                line=line,
+                value_kind=value_kind,
+                value_repr=value_repr,
+                scope=self._scope(),
+                operand_kind=operand_kind,
+            )
+        )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        # Step 1: Decorators and default values run outside the function.
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for type_param in getattr(node, "type_params", ()):
+            self.visit(type_param)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+        # Step 2: The body is a separate scope from the surrounding code.
+        self._push_scope(node.name, node.lineno)
+        for statement in node.body:
+            self.visit(statement)
+        self._pop_scope()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        # Step 1: Decorators and base classes belong to the enclosing scope.
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword)
+        for type_param in getattr(node, "type_params", ()):
+            self.visit(type_param)
+
+        # Step 2: The class body is its own scope. A method pushes another one.
+        self._push_scope(node.name, node.lineno)
+        for statement in node.body:
+            self.visit(statement)
+        self._pop_scope()
+
+    def visit_Global(self, node: ast.Global) -> None:
+        for name in node.names:
+            self.declarations.append(
+                NameDeclaration(self._scope(), name, "global", node.lineno)
+            )
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        for name in node.names:
+            self.declarations.append(
+                NameDeclaration(self._scope(), name, "nonlocal", node.lineno)
+            )
 
     def visit_Assign(self, node: ast.Assign) -> None:
         # Step 1: Record each plain name on the left. ``a = b = value`` has
@@ -188,14 +297,7 @@ class _StructureCollector(ast.NodeVisitor):
         value_kind, value_repr = _describe_expression(node.value)
         for target in node.targets:
             if isinstance(target, ast.Name):
-                self.assignments.append(
-                    Assignment(
-                        target=target.id,
-                        line=node.lineno,
-                        value_kind=value_kind,
-                        value_repr=value_repr,
-                    )
-                )
+                self._record_assignment(node.lineno, target.id, value_kind, value_repr)
 
         # Step 2: Walk the right-hand side so a call used as the value is
         # recorded too.
@@ -206,14 +308,7 @@ class _StructureCollector(ast.NodeVisitor):
         # ``secret: str`` does not, so there is no assignment to record.
         if isinstance(node.target, ast.Name) and node.value is not None:
             value_kind, value_repr = _describe_expression(node.value)
-            self.assignments.append(
-                Assignment(
-                    target=node.target.id,
-                    line=node.lineno,
-                    value_kind=value_kind,
-                    value_repr=value_repr,
-                )
-            )
+            self._record_assignment(node.lineno, node.target.id, value_kind, value_repr)
 
         # Step 2: Visit the value so its calls are still collected.
         self.generic_visit(node)
@@ -223,14 +318,13 @@ class _StructureCollector(ast.NodeVisitor):
         # distinct from a normal assignment so later tracking can treat it
         # carefully instead of pretending the value was replaced outright.
         if isinstance(node.target, ast.Name):
-            _value_kind, value_repr = _describe_expression(node.value)
-            self.assignments.append(
-                Assignment(
-                    target=node.target.id,
-                    line=node.lineno,
-                    value_kind="augassign",
-                    value_repr=value_repr,
-                )
+            operand_kind, value_repr = _describe_expression(node.value)
+            self._record_assignment(
+                node.lineno,
+                node.target.id,
+                "augassign",
+                value_repr,
+                operand_kind=operand_kind,
             )
 
         # Step 2: Visit the added value in case it contains a call.
@@ -258,6 +352,7 @@ class _StructureCollector(ast.NodeVisitor):
                 line=node.lineno,
                 arguments=tuple(_argument_text(arg) for arg in node.args),
                 keywords=tuple(keywords),
+                scope=self._scope(),
             )
         )
 

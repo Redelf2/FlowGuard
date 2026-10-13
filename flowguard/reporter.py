@@ -11,9 +11,9 @@ import json
 from dataclasses import asdict
 
 from flowguard import __version__
-from flowguard.parser import FunctionCall, ParseResult
+from flowguard.parser import Assignment, FunctionCall, ParseResult
 
-_NOT_IMPLEMENTED = "Taint analysis is not implemented yet."
+_FINDINGS_NOT_CHECKED = "Security findings: not checked yet."
 
 
 def format_parse_report(result: ParseResult, output_format: str = "text") -> str:
@@ -31,8 +31,8 @@ def format_parse_report(result: ParseResult, output_format: str = "text") -> str
             "version": __version__,
             "file": result.path,
             "analysis": "not_implemented",
-            "message": _NOT_IMPLEMENTED,
-            "assignments": [asdict(item) for item in result.assignments],
+            "message": _FINDINGS_NOT_CHECKED,
+            "assignments": [_assignment_payload(item) for item in result.assignments],
             "calls": [_call_payload(call) for call in result.calls],
         }
         return json.dumps(payload, indent=2) + "\n"
@@ -43,8 +43,7 @@ def format_parse_report(result: ParseResult, output_format: str = "text") -> str
         f"File: {result.path}",
         f"Parsed assignments: {len(result.assignments)}",
         f"Parsed function calls: {len(result.calls)}",
-        _NOT_IMPLEMENTED,
-        "Security findings: not checked yet.",
+        _FINDINGS_NOT_CHECKED,
         "",
         "Assignments:",
     ]
@@ -65,6 +64,21 @@ def format_parse_report(result: ParseResult, output_format: str = "text") -> str
         lines.append("  (none)")
 
     return "\n".join(lines) + "\n"
+
+
+def _assignment_payload(assignment: Assignment) -> dict[str, object]:
+    """Return the milestone 1 assignment fields.
+
+    Scope and operand kind stay on the Python object for the taint engine.
+    The parse report does not grow new fields.
+    """
+
+    return {
+        "target": assignment.target,
+        "line": assignment.line,
+        "value_kind": assignment.value_kind,
+        "value_repr": assignment.value_repr,
+    }
 
 
 def _call_payload(call: FunctionCall) -> dict[str, object]:
