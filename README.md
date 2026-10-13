@@ -223,19 +223,23 @@ A rule fires only for its own sources and sinks. `print(input())` is not FG001, 
 `python flowguard.py --evaluate` parses the labeled files and compares findings with the labels. One measured run reported:
 
 ```text
-Vulnerable files: 13
-Detected: 13
+Vulnerable files: 20
+Detected: 20
 Detection rate: 100.0%
-Safe files: 12
+Safe files: 18
 False positives: 0
 False-positive rate: 0.0%
-Unsupported files, not scored: 6
+Unsupported files, not scored: 11
 Unexpected findings in unsupported files: 0
-Elapsed: 0.043 seconds
+Elapsed: 0.050 seconds
 ```
 
 The elapsed time is from that run. A later run on the same machine can differ by a few milliseconds.
 
-Detection rate is the share of vulnerable files whose expected rule ids were reported. False-positive rate is the share of safe files that produced any finding. The six unsupported files are known limits, including `from os import *`, `print(str(secret))`, `logger.info`, an `or` expression, a function parameter that is not an import, and `self.secret`. They are not counted as misses or as false positives.
+The eight files named `author_written_chatgpt_` in `tests/samples/eval/eval_by_team/` are now labeled and scored. Their headers say they were written without opening the scorer. All three vulnerable files were detected. The three safe files produced no finding. The two unsupported files, a function parameter and `print(str(...))`, stayed out of both rates. The engine was not changed for this run.
 
-This is FlowGuard's own labeled set. It is not a comparison with Bandit or Semgrep.
+Detection rate is the share of vulnerable files whose expected rule ids were reported. False-positive rate is the share of safe files that produced any finding. The eleven unsupported files are known limits, including `from os import *`, `print(str(secret))`, `print("key=" + secret)`, a nested function using an outer import, `logger.info` and `logger.warning`, an `or` expression, a function parameter, and `self.secret`. They are not counted as misses or as false positives.
+
+Bandit and Semgrep were not installed in this environment, so they were not run and no comparison table was produced. Nothing was installed to add them.
+
+This is FlowGuard's own labeled set. It is not a comparison with another analyzer.

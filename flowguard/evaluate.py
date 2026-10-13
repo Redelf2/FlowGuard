@@ -246,6 +246,116 @@ LABELED_CASES: tuple[LabeledCase, ...] = (
         (),
         "self.secret is not a simple variable assignment.",
     ),
+    # Author-written cases. These were not supplied by teammates.
+    LabeledCase(
+        "tests/samples/eval/author/vulnerable/logging_warning_env.py",
+        "vulnerable",
+        ("FG001",),
+        "os.environ.get reaches logging.warning in one function.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/vulnerable/popen_shell.py",
+        "vulnerable",
+        ("FG002",),
+        "input() reaches subprocess.Popen with shell=True.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/vulnerable/check_output_input.py",
+        "vulnerable",
+        ("FG002",),
+        "input() reaches subprocess.check_output without shell=True.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/vulnerable/same_function_import.py",
+        "vulnerable",
+        ("FG001",),
+        "from os import getenv is in the same function that prints the value.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/safe/log_without_value.py",
+        "safe",
+        (),
+        "logging.info receives a literal. The getenv value is not logged.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/safe/fixed_popen.py",
+        "safe",
+        (),
+        "Popen receives a fixed argument list and no input() value.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/safe/input_replaced.py",
+        "safe",
+        (),
+        "input() is replaced by a literal before os.system.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/unsupported/concat_print.py",
+        "unsupported",
+        (),
+        "print receives secret joined with text, not the bare name.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/unsupported/nested_import.py",
+        "unsupported",
+        (),
+        "An import inside one function is not applied to a nested function.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/author/unsupported/logger_variable.py",
+        "unsupported",
+        (),
+        "logger.warning is not the configured name logging.warning.",
+    ),
+    # Written from the rule descriptions without opening the scorer.
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/vulnerable/author_written_chatgpt_fg001_env_print.py",
+        "vulnerable",
+        ("FG001",),
+        "os.getenv is copied to value_alias and passed to print.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/vulnerable/author_written_chatgpt_fg001_env_logging.py",
+        "vulnerable",
+        ("FG001",),
+        "os.environ.get is copied to token_copy and passed to logging.warning.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/vulnerable/author_written_chatgpt_fg002_popen.py",
+        "vulnerable",
+        ("FG002",),
+        "input() is copied to action_text and passed to subprocess.Popen with shell=True.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/safe/author_written_chatgpt_safe_fixed_command.py",
+        "safe",
+        (),
+        "subprocess.run receives a fixed argument list and shell=False.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/safe/author_written_chatgpt_safe_env_unused.py",
+        "safe",
+        (),
+        "os.getenv is stored, but print receives only the literal Service started.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/safe/author_written_chatgpt_safe_input_separate.py",
+        "safe",
+        (),
+        "input() is stored, but print receives only the literal Note received.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/unsupported/author_written_chatgpt_unsupported_parameter.py",
+        "unsupported",
+        (),
+        "The secret is passed through a function parameter before print.",
+    ),
+    LabeledCase(
+        "tests/samples/eval/eval_by_team/unsupported/author_written_chatgpt_unsupported_str_wrapper.py",
+        "unsupported",
+        (),
+        "print(str(secret_value)) hides the tainted name inside str().",
+    ),
 )
 
 

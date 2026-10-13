@@ -33,9 +33,9 @@ class EvaluationTests(unittest.TestCase):
     def test_corpus_detection_and_false_positive_rates(self) -> None:
         report = evaluate_corpus(ROOT)
 
-        self.assertEqual(report.vulnerable_files, 13)
-        self.assertEqual(report.safe_files, 12)
-        self.assertEqual(report.unsupported_files, 6)
+        self.assertEqual(report.vulnerable_files, 20)
+        self.assertEqual(report.safe_files, 18)
+        self.assertEqual(report.unsupported_files, 11)
         self.assertEqual(report.missed, ())
         self.assertEqual(report.false_positives, ())
         self.assertEqual(report.unexpected_unsupported, ())
