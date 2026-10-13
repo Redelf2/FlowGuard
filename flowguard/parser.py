@@ -1,17 +1,12 @@
 """Turn Python source into assignments and function calls.
 
-This module uses ``ast``, the standard-library parser. Parsing builds a
-tree of syntax nodes. It does not run the file. For example, parsing can
-see that a line calls ``os.getenv`` without reading an environment variable.
+An abstract syntax tree (AST) is a structured form of the source. For example,
+``backup = secret`` becomes an assignment node whose target is ``backup`` and
+whose value is the name ``secret``. Walking that tree lets FlowGuard see
+names, calls, and line numbers without running the file.
 
-The result is a list of facts later stages can use:
-
-* an assignment such as ``backup = secret``
-* a call such as ``print(backup)`` or ``subprocess.run(user_input, shell=True)``
-
-Facts keep the line number from the source file. The same variable name in
-two places is listed twice. This module does not decide whether those names
-refer to the same value. That is taint tracking, and it is not implemented yet.
+``ast.parse`` only reads the text. It does not import the target module and
+does not call any function defined in it.
 """
 
 from __future__ import annotations
@@ -21,231 +16,251 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-class FlowGuardParseError(Exception):
-    """A file could not be parsed. The target program was not run."""
+class FlowGuardSyntaxError(Exception):
+    """The file exists, but it is not valid Python."""
 
-
-class SourceFileNotFoundError(FlowGuardParseError):
-    """The path is missing or is not a file."""
-
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: str, detail: str, line: int | None = None) -> None:
         self.path = path
-        super().__init__(
-            f"Cannot read Python file. Path does not exist or is not a file: {path}"
-        )
-
-
-class SourceReadError(FlowGuardParseError):
-    """The path exists, but its text could not be read."""
-
-    def __init__(self, path: Path, reason: str) -> None:
-        self.path = path
-        super().__init__(f"Could not read {path}: {reason}")
-
-
-class InvalidPythonSyntaxError(FlowGuardParseError):
-    """The file is not valid Python, so there is no syntax tree to inspect."""
-
-    def __init__(self, filename: str, message: str, line: int | None) -> None:
-        self.filename = filename
         self.line = line
-        location = f"{filename}:{line}" if line is not None else filename
-        super().__init__(f"Invalid Python syntax in {location}: {message}")
+        if line is None:
+            message = f"{path}: {detail}"
+        else:
+            message = f"{path}:{line}: {detail}"
+        super().__init__(message)
+
+
+class SourceReadError(Exception):
+    """The path could not be read as UTF-8 source text."""
 
 
 @dataclass(frozen=True)
 class Assignment:
-    """One name being stored, and the source text of the value stored in it.
+    """A value stored in a simple variable name.
 
-    ``frozen`` means later code can pass these facts around without changing them.
+    ``value_kind`` says what the right-hand side is:
+
+    - ``name``: another variable, as in ``backup = secret``
+    - ``call``: a direct function call, as in ``secret = os.getenv("API_KEY")``
+    - ``constant``: a literal such as ``"public"`` or ``1``
+    - ``augassign``: an update such as ``secret += extra``
+    - ``other``: a shape this version only labels, such as a list or lambda
     """
 
-    line: int
     target: str
-    value: str
-
-    def to_dict(self) -> dict[str, object]:
-        return {"line": self.line, "target": self.target, "value": self.value}
+    line: int
+    value_kind: str
+    value_repr: str
 
 
 @dataclass(frozen=True)
 class KeywordArgument:
-    """One keyword argument, such as ``shell=True``."""
+    """One keyword at a call, such as ``shell=True``."""
 
     name: str
     value: str
 
-    def to_dict(self) -> dict[str, str]:
-        return {"name": self.name, "value": self.value}
-
 
 @dataclass(frozen=True)
 class FunctionCall:
-    """One function or method call, including arguments and the line it starts on."""
+    """One call found in the file, including calls nested inside other calls."""
 
-    line: int
     name: str
+    line: int
     arguments: tuple[str, ...]
     keywords: tuple[KeywordArgument, ...]
-
-    def display(self) -> str:
-        """Return source-like text such as ``subprocess.run(user_input, shell=True)``."""
-        parts = list(self.arguments)
-        for keyword in self.keywords:
-            if keyword.name == "**":
-                parts.append(f"**{keyword.value}")
-            else:
-                parts.append(f"{keyword.name}={keyword.value}")
-        return f"{self.name}({', '.join(parts)})"
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "line": self.line,
-            "name": self.name,
-            "arguments": list(self.arguments),
-            "keywords": [keyword.to_dict() for keyword in self.keywords],
-        }
 
 
 @dataclass(frozen=True)
 class ParseResult:
-    """Assignments and calls found in one Python file or source string."""
+    """Facts collected from one source file.
+
+    The same variable name can appear more than once. This object does not
+    decide which assignment is the current value, and it does not decide
+    whether two functions share a variable. That is taint tracking, which is
+    not done here.
+    """
 
     path: str
     assignments: tuple[Assignment, ...]
-    function_calls: tuple[FunctionCall, ...]
+    calls: tuple[FunctionCall, ...]
 
 
 def parse_file(path: str | Path) -> ParseResult:
-    """Read a Python file and list its assignments and calls.
+    """Read a source file and parse it. The file is not executed."""
 
-    The file is read as text and parsed. It is never imported or executed.
-    """
-    source_path = Path(path)
-    # Keep the caller's spelling. Path() on Windows would rewrite "/" as "\".
-    filename = path if isinstance(path, str) else str(source_path)
+    # Step 1: Accept a file path and reject directories or missing paths.
+    file_path = Path(path)
+    if file_path.is_dir():
+        raise IsADirectoryError(
+            f"Expected a Python file, but this path is a directory: {file_path}"
+        )
+    if not file_path.is_file():
+        raise FileNotFoundError(f"Python file not found: {file_path}")
 
-    # Step 1: Reject missing paths and directories before trying to parse.
-    if not source_path.is_file():
-        raise SourceFileNotFoundError(source_path)
-
-    # Step 2: Read source text only. Reading a file does not run it.
+    # Step 2: Read the bytes as UTF-8 text. Opening a file for reading does
+    # not run it.
     try:
-        source = source_path.read_text(encoding="utf-8")
+        source = file_path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
-        raise SourceReadError(
-            source_path,
-            "file is not valid UTF-8 text. FlowGuard only reads UTF-8 Python source.",
-        ) from exc
+        raise SourceReadError(f"Could not read {file_path} as UTF-8 text.") from exc
     except OSError as exc:
-        raise SourceReadError(source_path, str(exc)) from exc
+        detail = exc.strerror or str(exc)
+        raise SourceReadError(f"Could not read {file_path}: {detail}") from exc
 
-    # Step 3: Turn the text into assignments and calls.
-    return parse_source(source, filename=filename)
+    # Step 3: Parse the text into assignments and calls.
+    return parse_source(source, path=str(file_path))
 
 
-def parse_source(source: str, filename: str = "<string>") -> ParseResult:
+def parse_source(source: str, path: str = "<string>") -> ParseResult:
     """Parse Python source text that is already in memory."""
-    # Step 1: Build a syntax tree. ast.parse does not execute statements.
-    try:
-        tree = ast.parse(source, filename=filename)
-    except SyntaxError as exc:
-        raise InvalidPythonSyntaxError(
-            filename=filename,
-            message=exc.msg or "invalid syntax",
-            line=exc.lineno,
-        ) from exc
 
-    # Step 2: Walk the tree and collect assignments and calls in visit order.
-    collector = _SyntaxCollector()
+    # Step 1: Build an AST. A syntax error becomes our own exception so the
+    # command line can print a short message instead of a traceback.
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError as exc:
+        detail = exc.msg or "invalid syntax"
+        raise FlowGuardSyntaxError(path, detail, line=exc.lineno) from exc
+
+    # Step 2: Walk the tree in source order and keep the facts we need.
+    collector = _StructureCollector()
     collector.visit(tree)
     return ParseResult(
-        path=filename,
+        path=path,
         assignments=tuple(collector.assignments),
-        function_calls=tuple(collector.function_calls),
+        calls=tuple(collector.calls),
     )
 
 
-class _SyntaxCollector(ast.NodeVisitor):
-    """Walk an AST and record assignment and call nodes.
+def _dotted_name(node: ast.expr) -> str | None:
+    """Return ``os.getenv`` for a name or attribute chain, or None if the
+    expression is more complicated than a dotted name.
+    """
 
-    A NodeVisitor visits every syntax node. We only record two kinds.
-    Nested calls are still recorded, because visiting a call also visits
-    its arguments. For example, ``print(os.getenv("API_KEY"))`` records
-    both ``print`` and ``os.getenv``.
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _dotted_name(node.value)
+        if prefix is None:
+            return None
+        return f"{prefix}.{node.attr}"
+    return None
+
+
+def _describe_expression(node: ast.expr) -> tuple[str, str]:
+    """Return a short kind and text label for an expression."""
+
+    if isinstance(node, ast.Name):
+        return "name", node.id
+    if isinstance(node, ast.Constant):
+        return "constant", repr(node.value)
+    if isinstance(node, ast.Call):
+        return "call", _dotted_name(node.func) or "<complex>"
+    return "other", type(node).__name__
+
+
+def _argument_text(node: ast.expr) -> str:
+    """Describe one argument without trying to evaluate it."""
+
+    if isinstance(node, ast.Starred):
+        return "*" + _argument_text(node.value)
+    kind, text = _describe_expression(node)
+    if kind == "call":
+        return f"{text}()"
+    return text
+
+
+class _StructureCollector(ast.NodeVisitor):
+    """Collect simple assignments and every function call.
+
+    ``NodeVisitor`` starts at the top of the file and walks inward. Overriding
+    a visit method lets us record a node, then ``generic_visit`` continues
+    into the nodes inside it.
     """
 
     def __init__(self) -> None:
         self.assignments: list[Assignment] = []
-        self.function_calls: list[FunctionCall] = []
+        self.calls: list[FunctionCall] = []
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        # `a = b = value` has two targets. Record both with the same value.
+        # Step 1: Record each plain name on the left. ``a = b = value`` has
+        # two targets. Unpacking such as ``a, b = pair`` is left for later.
+        value_kind, value_repr = _describe_expression(node.value)
         for target in node.targets:
-            self._record_assignment(node.lineno, target, node.value)
+            if isinstance(target, ast.Name):
+                self.assignments.append(
+                    Assignment(
+                        target=target.id,
+                        line=node.lineno,
+                        value_kind=value_kind,
+                        value_repr=value_repr,
+                    )
+                )
+
+        # Step 2: Walk the right-hand side so a call used as the value is
+        # recorded too.
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        # `secret: str = ...` stores a value. `secret: str` does not.
-        if node.value is not None:
-            self._record_assignment(node.lineno, node.target, node.value)
+        # Step 1: ``secret: str = os.getenv("API_KEY")`` stores a value.
+        # ``secret: str`` does not, so there is no assignment to record.
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            value_kind, value_repr = _describe_expression(node.value)
+            self.assignments.append(
+                Assignment(
+                    target=node.target.id,
+                    line=node.lineno,
+                    value_kind=value_kind,
+                    value_repr=value_repr,
+                )
+            )
+
+        # Step 2: Visit the value so its calls are still collected.
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        # Step 1: ``secret += extra`` changes an existing name. Keep it
+        # distinct from a normal assignment so later tracking can treat it
+        # carefully instead of pretending the value was replaced outright.
+        if isinstance(node.target, ast.Name):
+            _value_kind, value_repr = _describe_expression(node.value)
+            self.assignments.append(
+                Assignment(
+                    target=node.target.id,
+                    line=node.lineno,
+                    value_kind="augassign",
+                    value_repr=value_repr,
+                )
+            )
+
+        # Step 2: Visit the added value in case it contains a call.
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        # Step 1: Record this call, including keyword arguments such as shell=True.
-        keywords = tuple(
-            KeywordArgument(
-                name=keyword.arg if keyword.arg is not None else "**",
-                value=ast.unparse(keyword.value),
-            )
-            for keyword in node.keywords
-        )
-        self.function_calls.append(
+        # Step 1: Record this call. Nested calls are separate records.
+        keywords: list[KeywordArgument] = []
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                keywords.append(
+                    KeywordArgument(name="**", value=_argument_text(keyword.value))
+                )
+            else:
+                keywords.append(
+                    KeywordArgument(
+                        name=keyword.arg,
+                        value=_argument_text(keyword.value),
+                    )
+                )
+
+        self.calls.append(
             FunctionCall(
+                name=_dotted_name(node.func) or "<complex>",
                 line=node.lineno,
-                name=_callable_name(node.func),
-                arguments=tuple(ast.unparse(argument) for argument in node.args),
-                keywords=keywords,
+                arguments=tuple(_argument_text(arg) for arg in node.args),
+                keywords=tuple(keywords),
             )
         )
 
-        # Step 2: Visit arguments so calls nested inside this call are recorded too.
+        # Step 2: Visit arguments and the callee so inner calls are recorded
+        # after the outer call.
         self.generic_visit(node)
-
-    def _record_assignment(self, line: int, target: ast.AST, value: ast.AST) -> None:
-        value_text = ast.unparse(value)
-        for name in _names_being_assigned(target):
-            self.assignments.append(Assignment(line=line, target=name, value=value_text))
-
-
-def _names_being_assigned(target: ast.AST) -> list[str]:
-    """Return the names written by an assignment target.
-
-    Unpacking such as ``a, b = pair`` yields both ``a`` and ``b``.
-    Each name is paired with the whole right-hand side. FlowGuard does
-    not yet split that value into separate parts.
-    """
-    if isinstance(target, ast.Name):
-        return [target.id]
-    if isinstance(target, (ast.Tuple, ast.List)):
-        names: list[str] = []
-        for element in target.elts:
-            names.extend(_names_being_assigned(element))
-        return names
-    if isinstance(target, ast.Starred):
-        return _names_being_assigned(target.value)
-    return [ast.unparse(target)]
-
-
-def _callable_name(func: ast.expr) -> str:
-    """Return a readable call name such as ``print`` or ``os.getenv``.
-
-    Import aliases are not resolved. ``from os import getenv`` followed by
-    ``getenv(...)`` is recorded as ``getenv``, because that is the name
-    written in the call.
-    """
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return f"{_callable_name(func.value)}.{func.attr}"
-    return ast.unparse(func)

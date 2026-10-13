@@ -1,4 +1,4 @@
-# No third-party packages are required.
-# FlowGuard and its tests use the Python standard library (including unittest).
-#
+# FlowGuard currently depends only on Python's standard library.
 # Python 3.10 or newer is required.
+#
+# No web framework, database, or machine-learning package is used.

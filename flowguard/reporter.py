@@ -1,74 +1,82 @@
-"""Format parser output for the terminal or for another program.
+"""Format the facts produced by the parser.
 
-This version formats a parse report: the assignments and calls that were
-found. It is not a vulnerability report. Findings with severity and
-remediation advice will be added when the rules exist.
+Milestone 1 reports what was parsed. It deliberately does not include an
+empty findings list. An empty list would look like "this file is safe", and
+this version does not make that decision.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 
 from flowguard import __version__
-from flowguard.parser import ParseResult
+from flowguard.parser import FunctionCall, ParseResult
 
-NOT_IMPLEMENTED_MESSAGE = (
-    "Security analysis is not implemented yet. "
-    "This report lists assignments and function calls only. "
-    "It is not a vulnerability finding."
-)
+_NOT_IMPLEMENTED = "Taint analysis is not implemented yet."
 
 
-def format_parse_report(result: ParseResult, output_format: str) -> str:
-    """Return a text or JSON parse report.
+def format_parse_report(result: ParseResult, output_format: str = "text") -> str:
+    """Return a text or JSON summary of one parse result."""
 
-    ``output_format`` is ``text`` or ``json``. A successful report means the
-    file was parsed. It does not mean the file is safe.
-    """
+    # Step 1: Reject a format the command line should never pass through.
+    if output_format not in {"text", "json"}:
+        raise ValueError("format must be 'text' or 'json'")
+
+    # Step 2: JSON is for later scripts. It repeats the parser facts and
+    # states that security analysis did not run.
     if output_format == "json":
-        return _format_json(result)
-    if output_format == "text":
-        return _format_text(result)
-    raise ValueError(f"Unsupported format: {output_format}. Use 'text' or 'json'.")
+        payload = {
+            "tool": "flowguard",
+            "version": __version__,
+            "file": result.path,
+            "analysis": "not_implemented",
+            "message": _NOT_IMPLEMENTED,
+            "assignments": [asdict(item) for item in result.assignments],
+            "calls": [_call_payload(call) for call in result.calls],
+        }
+        return json.dumps(payload, indent=2) + "\n"
 
-
-def _format_text(result: ParseResult) -> str:
+    # Step 3: Text is the form a person reads in the terminal.
     lines = [
-        f"FlowGuard {__version__} parse report",
+        "FlowGuard",
         f"File: {result.path}",
-        "",
-        NOT_IMPLEMENTED_MESSAGE,
+        f"Parsed assignments: {len(result.assignments)}",
+        f"Parsed function calls: {len(result.calls)}",
+        _NOT_IMPLEMENTED,
+        "Security findings: not checked yet.",
         "",
         "Assignments:",
     ]
     if result.assignments:
         for assignment in result.assignments:
             lines.append(
-                f"  line {assignment.line}: {assignment.target} = {assignment.value}"
+                f"  line {assignment.line}: {assignment.target} = "
+                f"{assignment.value_repr} ({assignment.value_kind})"
             )
     else:
         lines.append("  (none)")
 
-    lines.append("")
-    lines.append("Function calls:")
-    if result.function_calls:
-        for call in result.function_calls:
-            lines.append(f"  line {call.line}: {call.display()}")
+    lines.extend(["", "Function calls:"])
+    if result.calls:
+        for call in result.calls:
+            lines.append(f"  line {call.line}: {_render_call(call)}")
     else:
         lines.append("  (none)")
 
-    lines.append("")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
-def _format_json(result: ParseResult) -> str:
-    payload = {
-        "flowguard_version": __version__,
-        "file": result.path,
-        "status": "parsed",
-        "analysis": "not_implemented",
-        "message": NOT_IMPLEMENTED_MESSAGE,
-        "assignments": [assignment.to_dict() for assignment in result.assignments],
-        "function_calls": [call.to_dict() for call in result.function_calls],
+def _call_payload(call: FunctionCall) -> dict[str, object]:
+    return {
+        "name": call.name,
+        "line": call.line,
+        "arguments": list(call.arguments),
+        "keywords": [asdict(keyword) for keyword in call.keywords],
     }
-    return json.dumps(payload, indent=2)
+
+
+def _render_call(call: FunctionCall) -> str:
+    parts = list(call.arguments)
+    parts.extend(f"{keyword.name}={keyword.value}" for keyword in call.keywords)
+    return f"{call.name}({', '.join(parts)})"

@@ -1,24 +1,8 @@
-"""FlowGuard: a static analyzer for selected risky data flows in Python.
+"""FlowGuard: a static analyzer for a small set of risky Python data flows.
 
-Version 0.1 reads Python files and lists assignments and function calls.
-It does not track data flow or report vulnerabilities yet.
+This package reads Python source and inspects its structure. It does not run
+the target program. Milestone 1 parses files. Later milestones will track
+tainted values and report findings.
 """
 
 __version__ = "0.1.0"
-
-from flowguard.parser import (
-    InvalidPythonSyntaxError,
-    SourceFileNotFoundError,
-    SourceReadError,
-    parse_file,
-    parse_source,
-)
-
-__all__ = [
-    "InvalidPythonSyntaxError",
-    "SourceFileNotFoundError",
-    "SourceReadError",
-    "__version__",
-    "parse_file",
-    "parse_source",
-]

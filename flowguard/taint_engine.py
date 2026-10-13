@@ -1,31 +1,31 @@
-"""Taint tracking for FlowGuard.
+"""Track tainted values from a source to later uses.
 
-Taint tracking means labeling data that comes from a sensitive or untrusted
-source and following that label as the data is copied between variables.
+Taint tracking means labeling a value that came from a chosen source, then
+following that label when the value is copied. In ``backup = secret``, the
+label on ``secret`` should also be placed on ``backup``.
 
-Example the next milestone will handle:
-
-    secret = os.getenv("API_KEY")
-    backup = secret
-
-After ``backup = secret``, both names refer to data that started at ``os.getenv``.
-If ``secret`` is later assigned a new value, the old label should not stick
-to that new value.
-
-This module does not do that yet. Calling it fails on purpose so a missing
-implementation cannot be mistaken for "no risk found".
+This module is only a placeholder in milestone 1. The parser can list
+assignments, but it does not yet decide which later names still hold a
+tainted value.
 """
 
+from __future__ import annotations
 
-def track_taint(parsed_program: object) -> list[object]:
-    """Follow tainted values through assignments.
+from typing import NoReturn
 
-    Raises:
-        NotImplementedError: taint tracking is the next milestone.
+from flowguard.parser import ParseResult
+
+
+def trace_assignments(parse_result: ParseResult) -> NoReturn:
+    """Follow direct assignments and aliases.
+
+    Not implemented yet. Milestone 2 will use ``parse_result.assignments``
+    to track copies such as ``backup = secret`` and to respect later
+    reassignment inside the chosen scope.
     """
-    del parsed_program
+
     raise NotImplementedError(
-        "Taint tracking is not implemented yet. "
-        "FlowGuard can list assignments and calls, but it does not yet follow "
-        "values from one variable to another."
+        "Taint tracking is not implemented yet for "
+        f"{parse_result.path}. The next milestone will follow values "
+        "through direct assignments and aliases."
     )

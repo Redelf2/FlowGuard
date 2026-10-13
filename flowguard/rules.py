@@ -1,56 +1,103 @@
-"""Security rules for FlowGuard.
+"""The security checks FlowGuard plans to apply.
 
-A rule describes one kind of risky data flow: where data may come from,
-and where it becomes dangerous if it arrives there. A match is a potential
-risk. Static evidence alone does not prove that the program is exploitable.
+A rule here is a written definition: which call names count as sources,
+which call names count as destinations, and how a later report should
+describe the risk. Nothing in this module searches a file. The taint engine
+has to build a path from a source to a destination before a rule can fire.
 
-The rules below are the plan. Nothing in this module detects a flow yet.
+Severities chosen for the first version:
+
+- ``medium`` for potential exposure. An environment read is not automatically
+  a secret, and printing it is not proof that an attacker can see it.
+- ``high`` for potential command injection. Untrusted input reaching a
+  command call is the more serious of the two checks, especially if a later
+  version sees ``shell=True``.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class PlannedRule:
-    """A rule we intend to implement. It does not detect anything yet."""
+class Rule:
+    """One configured check. Defining a rule does not run it."""
 
     rule_id: str
     title: str
-    summary: str
+    severity: str
+    sources: tuple[str, ...]
+    sinks: tuple[str, ...]
+    explanation: str
+    recommended_fix: str
+    limitation: str
 
 
-# Rule ids stay stable so later reports and tests can refer to them.
-PLANNED_RULES: tuple[PlannedRule, ...] = (
-    PlannedRule(
+_NOT_PROVEN = (
+    "A match is a potential risk based on the configured names and a tracked "
+    "path. FlowGuard does not execute the program and does not prove that "
+    "the flow is exploitable."
+)
+
+
+RULES: tuple[Rule, ...] = (
+    Rule(
         rule_id="FG001",
         title="Potential sensitive-data exposure",
-        summary=(
-            "Track configured secret sources such as os.getenv() "
-            "through assignments to print() or selected logging calls."
+        severity="medium",
+        sources=("os.getenv", "os.environ.get"),
+        sinks=(
+            "print",
+            "logging.debug",
+            "logging.info",
+            "logging.warning",
+            "logging.error",
+            "logging.critical",
         ),
+        explanation=(
+            "A value read by a configured secret source may reach a print "
+            "or logging call. This is a potential exposure: not every "
+            "environment variable is a secret."
+        ),
+        recommended_fix=(
+            "Avoid sending secret values to logs or standard output. "
+            "Redact them, or log only the fact that a value was loaded."
+        ),
+        limitation=_NOT_PROVEN,
     ),
-    PlannedRule(
+    Rule(
         rule_id="FG002",
         title="Potential command injection",
-        summary=(
-            "Track untrusted input such as input() through assignments "
-            "to command execution such as subprocess.run(), "
-            "especially when shell=True."
+        severity="high",
+        sources=("input",),
+        sinks=(
+            "subprocess.run",
+            "subprocess.call",
+            "subprocess.check_output",
+            "subprocess.Popen",
+            "os.system",
         ),
+        explanation=(
+            "A value from a configured untrusted-input source may reach a "
+            "command-execution call. shell=True makes that pattern more "
+            "dangerous when it is present, but the rule still describes a "
+            "potential risk rather than a confirmed exploit."
+        ),
+        recommended_fix=(
+            "Do not build a shell command from untrusted input. Pass a "
+            "fixed program and a list of arguments to subprocess, and avoid "
+            "shell=True."
+        ),
+        limitation=_NOT_PROVEN,
     ),
 )
 
 
-def apply_rules(parsed_program: object) -> list[object]:
-    """Check parsed code against the security rules.
+def get_rule(rule_id: str) -> Rule:
+    """Return one configured rule by its id, such as ``FG001``."""
 
-    Raises:
-        NotImplementedError: rule checking is a later milestone.
-            An empty list would look like a clean scan, which would be misleading.
-    """
-    del parsed_program
-    raise NotImplementedError(
-        "Security rules are not implemented yet. "
-        "FlowGuard does not yet decide whether a flow is risky, "
-        "and it does not report vulnerabilities."
-    )
+    for rule in RULES:
+        if rule.rule_id == rule_id:
+            return rule
+    known_ids = ", ".join(rule.rule_id for rule in RULES)
+    raise KeyError(f"Unknown rule {rule_id!r}. Known rules: {known_ids}")

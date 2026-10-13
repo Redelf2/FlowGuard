@@ -1,28 +1,26 @@
-"""Tests for the taint-tracking boundary in Milestone 1.
-
-Taint tracking is intentionally not implemented. These tests lock that
-behavior so an empty result cannot be mistaken for a finished analysis.
-"""
+"""The taint engine is intentionally not implemented in milestone 1."""
 
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from flowguard.taint_engine import track_taint
+from flowguard.parser import parse_source
+from flowguard.taint_engine import trace_assignments
 
 
 class TaintEngineTests(unittest.TestCase):
-    def test_tracking_is_not_implemented(self) -> None:
-        with self.assertRaises(NotImplementedError) as caught:
-            track_taint(None)
+    def test_tracing_assignments_is_not_implemented_yet(self) -> None:
+        parsed = parse_source(
+            "secret = os.getenv('API_KEY')\nbackup = secret\n",
+            path="example.py",
+        )
 
-        self.assertIn("not implemented", str(caught.exception).lower())
+        with self.assertRaises(NotImplementedError) as caught:
+            trace_assignments(parsed)
+
+        message = str(caught.exception)
+        self.assertIn("not implemented", message.lower())
+        self.assertIn("example.py", message)
 
 
 if __name__ == "__main__":

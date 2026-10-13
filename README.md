@@ -1,152 +1,174 @@
 # FlowGuard
 
-FlowGuard is a university project: a small static analyzer for Python. It reads source code and looks for selected risky data flows. It does not run the program it inspects.
+FlowGuard is a small static analyzer for Python. It reads source code and looks for a few kinds of risky data flow. It does not run the program it analyzes.
 
-Two kinds of flow are planned:
+This repository is milestone 1. The parser works. Taint tracking and security findings do not work yet.
 
-1. **Potential sensitive-data exposure.** A value from a source such as `os.getenv()` is copied through variables and reaches `print()` or a selected logging call.
-2. **Potential command injection.** A value from `input()` reaches a command-execution call such as `subprocess.run()`, especially with `shell=True`.
+## What this version does
 
-A finding will mean "the source text matches a rule," not "this is proven to be exploitable."
+Given a Python file, FlowGuard:
 
-## What works in this version (0.1)
+1. Reads the file as text.
+2. Parses it with Python's built-in `ast` module.
+3. Lists simple variable assignments and function calls, with line numbers.
+4. Prints that summary as text or JSON.
 
-The parser works. It uses Python's built-in `ast` module. AST means Abstract Syntax Tree: a structured tree of the code's syntax. From that tree, FlowGuard lists:
+An **abstract syntax tree (AST)** is a structured version of the source. `backup = secret` becomes an assignment whose target is `backup` and whose value is the name `secret`. FlowGuard walks that tree instead of executing the file.
 
-- assignments, such as `backup = secret`, with line numbers
-- function and method calls, such as `os.getenv(...)` and `subprocess.run(..., shell=True)`, with line numbers and arguments
+A successful parse is not a security result. The report says `Security findings: not checked yet.` JSON output has no `findings` field, because an empty list would look like "nothing risky was found."
 
-The command-line tool can read one Python file and print that list as text or JSON.
+## What this version does not do
 
-## What is not implemented yet
+- It does not follow a value from `os.getenv()` through `backup = secret` to `print()`.
+- It does not decide that a file is safe or unsafe.
+- It does not apply the rules below to real code yet. The rules are written down so the next milestones have a fixed list.
+- It does not execute, exploit, or rewrite the target file.
 
-These parts exist only as placeholders, so the tool cannot pretend the scan is finished:
+## Planned rules
 
-- taint tracking (following a value from variable to variable)
-- security rules and vulnerability findings
-- severity, remediation text, and confidence
-- scanning a whole directory
+These names are the first configured set. A finding will later require a tracked path from a source to a sink. A match will be described as a **potential** risk.
 
-`track_taint()` and `apply_rules()` raise `NotImplementedError` on purpose. An empty finding list would look like a clean result, which would be misleading.
+| ID | Title | Severity | Sources | Destinations |
+| --- | --- | --- | --- | --- |
+| FG001 | Potential sensitive-data exposure | medium | `os.getenv`, `os.environ.get` | `print`, selected `logging.*` calls |
+| FG002 | Potential command injection | high | `input` | `subprocess.run`, `subprocess.call`, `subprocess.check_output`, `subprocess.Popen`, `os.system` |
 
-Exit code 0 means the file was parsed. It does not mean the file is safe.
+Severity is a project choice, not a measurement of exploitability. FG002 is `high` because untrusted input reaching a command is the more serious of the two checks. FG001 is `medium` because an environment variable is not automatically a secret.
 
-## Setup
-
-Install Python 3.10 or newer. This project has no third-party dependencies. You do not need to install anything from `requirements.txt`.
-
-Check the version:
-
-```bash
-python --version
-```
-
-## Usage
-
-From the `FlowGuard` directory:
-
-```bash
-python flowguard.py tests/samples/vulnerable_secret.py
-```
-
-JSON parse report:
-
-```bash
-python flowguard.py tests/samples/vulnerable_secret.py --format json
-```
-
-Text output looks like this:
-
-```text
-FlowGuard 0.1.0 parse report
-File: tests/samples/vulnerable_secret.py
-
-Security analysis is not implemented yet. This report lists assignments and function calls only. It is not a vulnerability finding.
-
-Assignments:
-  line 5: secret = os.getenv('API_KEY')
-  line 6: backup = secret
-
-Function calls:
-  line 5: os.getenv('API_KEY')
-  line 7: print(backup)
-```
-
-The quotes in call text come from `ast.unparse`. They may differ from the quotes in the original file. The call name and line number still refer to that source line.
-
-Missing files and invalid Python syntax are written to standard error, and the process exits with status 2.
-
-## Samples
-
-The files in `tests/samples/` are inputs for the analyzer. Do not run them.
-
-| File | Role |
-| --- | --- |
-| `vulnerable_secret.py` | Example flow `os.getenv` → `secret` → `backup` → `print` |
-| `vulnerable_command.py` | Example flow `input` → `user_input` → `subprocess.run(..., shell=True)` |
-| `safe_example.py` | Ordinary string and a fixed argument list with `shell=False` |
-
-`vulnerable_command.py` would pass typed text to a shell if you executed it. FlowGuard only reads it. The safe sample is labeled for later rule tests. Version 0.1 does not judge it safe or unsafe.
-
-## Tests
-
-From the `FlowGuard` directory:
-
-```bash
-python -m unittest discover -s tests -v
-```
+`shell=True` is already captured by the parser when it appears as a keyword. The command rule does not use that fact until detection exists.
 
 ## Project layout
 
 ```text
 FlowGuard/
-├── flowguard.py              # command-line entry point
+├── flowguard.py                 # command-line entry point
 ├── flowguard/
-│   ├── parser.py             # ast parsing (implemented)
-│   ├── taint_engine.py       # data-flow tracking (not implemented)
-│   ├── rules.py              # FG001 and FG002 plan (not implemented)
-│   └── reporter.py           # text and JSON parse reports
+│   ├── __init__.py              # package version
+│   ├── parser.py                # AST extraction (implemented)
+│   ├── taint_engine.py          # assignment tracking (not implemented)
+│   ├── rules.py                 # rule definitions (not applied yet)
+│   └── reporter.py              # text and JSON for the parse summary
 ├── tests/
+│   ├── __init__.py              # makes tests importable
 │   ├── test_parser.py
 │   ├── test_taint_engine.py
 │   ├── test_rules.py
 │   └── samples/
+│       ├── vulnerable_secret.py
+│       ├── vulnerable_command.py
+│       └── safe_example.py
 ├── README.md
 └── requirements.txt
 ```
 
-`flowguard.py` is the script you run. The `flowguard/` directory is the importable package. On Python 3.14, running the script can still `import flowguard` and receive the package.
+`vulnerable_command.py` would run a shell command if you executed it yourself. The tests and the FlowGuard command only read it.
 
-## Parser behavior and limitations
+## Setup
 
-Supported now:
+Install Python 3.10 or newer. No third-party packages are required.
 
-- normal assignments, including `a = b = value`
-- annotated assignments such as `secret: str = input()`
-- unpacking on the left, such as `left, right = pair` (both names get the whole right-hand side)
-- simple calls, dotted calls such as `os.getenv`, nested calls, and keyword arguments
-- accurate starting line numbers, including for a call written across several lines
+From this directory:
 
-Not handled yet, and not reported as if they were handled:
+```bash
+python -m unittest discover -s tests -t . -v
+```
 
-- telling two uses of the same name apart by function or scope
-- following a value through an alias (`backup = secret` is only listed, not linked)
-- resolving imports (`from os import getenv` is recorded as a call named `getenv`, not `os.getenv`)
-- augmented assignments such as `count += input()` (the `input()` call is listed; the assignment is not)
-- assignment expressions such as `secret := os.getenv(...)` (the call is listed; the assignment is not)
-- names bound by `for` or `with`
-- splitting a tuple on the right-hand side into separate values
-- directory scans, classes, cross-file flows, and dynamic calls such as `eval`
+On Windows, if `python` is not available, use `py -3` instead.
 
-The parser never imports the target file and never calls `exec`.
+## Usage
 
-## Planned rules
+From the project root:
 
-| ID | Title | Idea |
-| --- | --- | --- |
-| FG001 | Potential sensitive-data exposure | `os.getenv()` and other configured secret sources reaching `print()` or selected logging calls |
-| FG002 | Potential command injection | `input()` and other configured untrusted sources reaching `subprocess.run()` and similar calls |
+```bash
+python flowguard.py tests/samples/vulnerable_secret.py
+```
+
+```bash
+python flowguard.py tests/samples/vulnerable_command.py --format json
+```
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The file parsed. Findings were not checked. |
+| 2 | The path is missing, is a directory, could not be read, or is not valid Python. |
+
+Parser errors go to standard error. The summary goes to standard output.
+
+Example text summary:
+
+```text
+FlowGuard
+File: tests\samples\vulnerable_secret.py
+Parsed assignments: 2
+Parsed function calls: 2
+Taint analysis is not implemented yet.
+Security findings: not checked yet.
+
+Assignments:
+  line 9: secret = os.getenv (call)
+  line 10: backup = secret (name)
+
+Function calls:
+  line 9: os.getenv('API_KEY')
+  line 11: print(backup)
+```
+
+The file path uses your operating system's separators. The example above is the Windows output.
+
+The line numbers follow the sample file, including its docstring.
+
+## Parser behavior
+
+Recorded assignments:
+
+- `secret = os.getenv("API_KEY")` is a `call` assignment, and `os.getenv` is also a call.
+- `backup = secret` is a `name` assignment. That is an alias: a copy from one variable to another.
+- `message = "hello"` is a `constant` assignment. Literal text is shown with `repr`, so the report contains `'hello'`.
+- `secret: str = ...` is recorded. `secret: str` without a value is not.
+- `secret += extra` is recorded as `augassign`.
+- `a = b = value` records both `a` and `b`.
+- Two assignments to the same name are both kept, including the same name in two different functions. The parser does not decide which write is current and does not track scope.
+
+Recorded calls include positional arguments and keywords. `subprocess.run(user_input, shell=True)` keeps the argument `user_input` and the keyword `shell=True`. Calls nested inside other calls are listed outer call first.
+
+## Known parser limits
+
+These are recorded limits, not silent guesses:
+
+- Tuple unpacking such as `first, second = pair` is not turned into simple assignments. Calls inside the statement are still listed.
+- Assignments to attributes or subscripts, such as `self.secret = ...` or `data["k"] = ...`, are not treated as simple variables.
+- A call written as something other than a plain dotted name is labeled `<complex>`.
+- `import os` does not by itself create a call. `getenv()` and `os.getenv()` are different names. Import aliases are not resolved.
+- `os.environ["API_KEY"]` is a subscript, not a call, so it is not a source in the current rule list.
+- The file must be UTF-8. The extension does not have to be `.py`; the contents must be valid Python syntax.
+- Every call in the file is listed, including calls inside functions and decorators. Listing a call does not mean it is reachable at runtime.
+
+## Samples
+
+| File | What it is for |
+| --- | --- |
+| `tests/samples/vulnerable_secret.py` | `os.getenv` is copied to `backup` and then printed. Later this should be a potential FG001 flow. |
+| `tests/samples/vulnerable_command.py` | `input()` is passed to `subprocess.run(..., shell=True)`. Later this should be a potential FG002 flow. Do not run this file. |
+| `tests/samples/safe_example.py` | `print` receives `message`, which is the literal `"hello"`. `secret` comes from `os.getenv` and does not reach `print` in this file. The parser only shows those facts. |
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -t . -v
+```
+
+`-t .` puts the project root on the import path so `import flowguard` loads the package.
+
+The parser tests include a file that would create a marker file if it were executed. The test fails if that marker appears.
 
 ## Next milestone
 
-Basic taint tracking inside one file: mark source calls, copy that mark through direct assignments and aliases, and drop it when a variable is assigned a new value. Rules and finding reports come after that tracking is tested.
+Milestone 2 is basic taint tracking:
+
+- Mark values that come from the configured source calls.
+- Copy that mark through direct assignments and aliases such as `backup = secret`.
+- When the same name is assigned again, stop treating the old value as the current one inside the scope we choose.
+- Do not report a finding for an unrelated variable.
+- Keep scope limits explicit where the engine cannot follow the value accurately.

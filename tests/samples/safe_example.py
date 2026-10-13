@@ -1,10 +1,13 @@
-# Sample for static analysis only. Do not run this file.
-# Labeled safe for the planned rules:
-# print receives an ordinary string, not a configured secret source.
-# subprocess.run receives a fixed argument list and shell=False.
-# The parser does not decide safety. Later rule tests will use this file.
-import subprocess
+"""A secret is loaded, but the printed value is a different variable.
 
-status = "ok"
-print(status)
-subprocess.run(["echo", "hello"], shell=False)
+This file is not labeled safe because it "looks fine". For the planned
+rules, print() receives message, and message is the literal "hello".
+The getenv result is stored in secret and does not reach print in this file.
+Milestone 1 only parses these facts. It does not judge the file.
+"""
+
+import os
+
+secret = os.getenv("API_KEY")
+message = "hello"
+print(message)

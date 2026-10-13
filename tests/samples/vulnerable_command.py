@@ -1,5 +1,9 @@
-# Sample for static analysis only. Do not run this file.
-# Intended flow for a later rule: input -> user_input -> subprocess.run
+"""Untrusted input passed to a shell command.
+
+This sample is for static analysis only. Do not execute it: if someone
+entered a shell command, subprocess.run would run that command.
+"""
+
 import subprocess
 
 user_input = input("Enter a command: ")

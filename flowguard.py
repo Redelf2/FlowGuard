@@ -1,15 +1,12 @@
 """Command-line entry point for FlowGuard.
 
-Run it as a script, for example:
+Examples, from the project root:
 
     python flowguard.py tests/samples/vulnerable_secret.py
+    python flowguard.py tests/samples/vulnerable_command.py --format json
 
-Python loads this file as ``__main__``. The ``import flowguard`` statement
-below still loads the ``flowguard`` package directory, not this script.
-The package and this filename can therefore share a name.
-
-The command parses one Python file. It does not run that file, and it does
-not report vulnerabilities yet.
+The path is parsed and is not executed. This version prints the assignments
+and calls it found. It does not report security findings yet.
 """
 
 from __future__ import annotations
@@ -17,49 +14,68 @@ from __future__ import annotations
 import argparse
 import sys
 
-from flowguard.parser import FlowGuardParseError, parse_file
+from flowguard.parser import FlowGuardSyntaxError, SourceReadError, parse_file
 from flowguard.reporter import format_parse_report
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    """Describe the command-line arguments."""
-    parser = argparse.ArgumentParser(
+    """Describe the milestone 1 command line."""
+
+    return argparse.ArgumentParser(
         prog="flowguard",
         description=(
             "Parse a Python file and list assignments and function calls. "
-            "The file is not executed. Security analysis is not implemented yet."
+            "The file is not executed. Taint analysis is not implemented yet."
         ),
+        epilog=(
+            "examples:\n"
+            "  python flowguard.py tests/samples/vulnerable_secret.py\n"
+            "  python flowguard.py tests/samples/vulnerable_command.py --format json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "path",
-        help="Path to the Python file to read. The file is parsed, not executed.",
-    )
-    parser.add_argument(
-        "--format",
-        choices=("text", "json"),
-        default="text",
-        help="Output format. Default: text. json is a parse report, not a finding list.",
-    )
-    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse one file and print a parse report.
+    """Parse one file and print a summary.
 
-    Returns 0 when the file was parsed. That does not mean the file is safe.
-    Returns 2 when the file is missing, unreadable, or not valid Python.
+    Returns 0 when the file parsed, and 2 when the path or the source is
+    unusable. A successful parse is not a claim that the file is safe.
     """
-    arguments = build_argument_parser().parse_args(argv)
 
-    # Step 1: Parse the requested file. Parser errors are explained on stderr.
+    # Step 1: Read the path and the output format.
+    argument_parser = build_argument_parser()
+    argument_parser.add_argument(
+        "path",
+        help="Python file to parse. FlowGuard reads this file and does not run it.",
+    )
+    argument_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Print a text summary or JSON (default: text).",
+    )
+    arguments = argument_parser.parse_args(argv)
+
+    # Step 2: Parse the file. Parser errors stay short; they are expected
+    # input problems, not internal crashes.
     try:
         parsed = parse_file(arguments.path)
-    except FlowGuardParseError as error:
-        print(str(error), file=sys.stderr)
+    except FileNotFoundError as error:
+        print(error, file=sys.stderr)
+        return 2
+    except IsADirectoryError as error:
+        print(error, file=sys.stderr)
+        return 2
+    except SourceReadError as error:
+        print(error, file=sys.stderr)
+        return 2
+    except FlowGuardSyntaxError as error:
+        print(error, file=sys.stderr)
         return 2
 
-    # Step 2: Show the assignments and calls. Rules are not applied yet.
-    print(format_parse_report(parsed, arguments.format))
+    # Step 3: Show the parse summary. Findings are intentionally absent.
+    print(format_parse_report(parsed, arguments.format), end="")
     return 0
 
 
