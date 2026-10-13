@@ -57,6 +57,7 @@ class Assignment:
     value_repr: str
     scope: str = "<module>"
     operand_kind: str = ""
+    sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,33 @@ class FunctionCall:
     arguments: tuple[str, ...]
     keywords: tuple[KeywordArgument, ...]
     scope: str = "<module>"
+    sequence: int = 0
+
+
+@dataclass(frozen=True)
+class ImportBinding:
+    """One imported name that may stand for a known source call.
+
+    ``canonical_name`` is empty when the import is real but is not one of the
+    known source functions. An empty name still matters: it can disagree with
+    another import of the same local name, and then neither one is trusted.
+    ``kind`` is ``function`` for ``from os import getenv as read_env`` and
+    ``module`` for ``import os as os_module``.
+    """
+
+    scope: str
+    local_name: str
+    canonical_name: str
+    kind: str
+    line: int
+
+
+@dataclass(frozen=True)
+class DefinedName:
+    """A function, class, or parameter name that hides an imported name."""
+
+    scope: str
+    name: str
 
 
 @dataclass(frozen=True)
@@ -105,6 +133,9 @@ class ParseResult:
     assignments: tuple[Assignment, ...]
     calls: tuple[FunctionCall, ...]
     declarations: tuple[NameDeclaration, ...] = ()
+    imports: tuple[ImportBinding, ...] = ()
+    defined_names: tuple[DefinedName, ...] = ()
+    star_import_scopes: tuple[str, ...] = ()
 
 
 def parse_file(path: str | Path) -> ParseResult:
@@ -152,7 +183,31 @@ def parse_source(source: str, path: str = "<string>") -> ParseResult:
         assignments=tuple(collector.assignments),
         calls=tuple(collector.calls),
         declarations=tuple(collector.declarations),
+        imports=tuple(collector.imports),
+        defined_names=tuple(collector.defined_names),
+        star_import_scopes=tuple(collector.star_import_scopes),
     )
+
+
+# Only these functions are worth aliasing. A matching local name from any
+# other module stays unrelated.
+_KNOWN_FUNCTIONS: dict[tuple[str, str], str] = {
+    ("os", "getenv"): "os.getenv",
+    ("os.environ", "get"): "os.environ.get",
+    ("builtins", "input"): "input",
+}
+_KNOWN_MODULES = frozenset({"os", "os.environ"})
+
+
+def _parameter_names(args: ast.arguments) -> list[str]:
+    names = [parameter.arg for parameter in args.posonlyargs]
+    names.extend(parameter.arg for parameter in args.args)
+    names.extend(parameter.arg for parameter in args.kwonlyargs)
+    if args.vararg is not None:
+        names.append(args.vararg.arg)
+    if args.kwarg is not None:
+        names.append(args.kwarg.arg)
+    return names
 
 
 def _dotted_name(node: ast.expr) -> str | None:
@@ -205,7 +260,17 @@ class _StructureCollector(ast.NodeVisitor):
         self.assignments: list[Assignment] = []
         self.calls: list[FunctionCall] = []
         self.declarations: list[NameDeclaration] = []
+        self.imports: list[ImportBinding] = []
+        self.defined_names: list[DefinedName] = []
+        self.star_import_scopes: list[str] = []
         self._scopes: list[str] = ["<module>"]
+        self._sequence = 0
+
+    def _take_sequence(self) -> int:
+        # Later rules replay this order, so a sink only sees earlier assignments.
+        number = self._sequence
+        self._sequence += 1
+        return number
 
     def _scope(self) -> str:
         return self._scopes[-1]
@@ -237,6 +302,7 @@ class _StructureCollector(ast.NodeVisitor):
                 value_repr=value_repr,
                 scope=self._scope(),
                 operand_kind=operand_kind,
+                sequence=self._take_sequence(),
             )
         )
 
@@ -256,8 +322,13 @@ class _StructureCollector(ast.NodeVisitor):
         if node.returns is not None:
             self.visit(node.returns)
 
-        # Step 2: The body is a separate scope from the surrounding code.
+        # Step 2: The function name hides an import of the same name outside.
+        self.defined_names.append(DefinedName(self._scope(), node.name))
+
+        # Step 3: The body is a separate scope. Parameters hide imports there.
         self._push_scope(node.name, node.lineno)
+        for parameter_name in _parameter_names(node.args):
+            self.defined_names.append(DefinedName(self._scope(), parameter_name))
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
@@ -273,11 +344,65 @@ class _StructureCollector(ast.NodeVisitor):
         for type_param in getattr(node, "type_params", ()):
             self.visit(type_param)
 
-        # Step 2: The class body is its own scope. A method pushes another one.
+        # Step 2: The class name hides an import of the same name outside.
+        self.defined_names.append(DefinedName(self._scope(), node.name))
+
+        # Step 3: The class body is its own scope. A method pushes another one.
         self._push_scope(node.name, node.lineno)
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
+
+    def visit_Import(self, node: ast.Import) -> None:
+        # ``import os as os_module`` can make os_module.getenv mean os.getenv.
+        # A plain ``import os`` needs no binding because the call already says os.getenv.
+        for alias in node.names:
+            if alias.name not in _KNOWN_MODULES or alias.asname is None:
+                continue
+            self.imports.append(
+                ImportBinding(
+                    scope=self._scope(),
+                    local_name=alias.asname,
+                    canonical_name=alias.name,
+                    kind="module",
+                    line=node.lineno,
+                )
+            )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        # Step 1: Star and relative imports do not name one function clearly.
+        if any(alias.name == "*" for alias in node.names):
+            self.star_import_scopes.append(self._scope())
+            return
+        if node.level != 0:
+            for alias in node.names:
+                local_name = alias.asname or alias.name
+                self.imports.append(
+                    ImportBinding(
+                        scope=self._scope(),
+                        local_name=local_name,
+                        canonical_name="",
+                        kind="function",
+                        line=node.lineno,
+                    )
+                )
+            return
+
+        # Step 2: Record each imported name. Unknown modules stay blank so they
+        # can disagree with a known import of the same local name.
+        module_name = node.module or ""
+        for alias in node.names:
+            local_name = alias.asname or alias.name
+            canonical_name = _KNOWN_FUNCTIONS.get((module_name, alias.name), "")
+            self.imports.append(
+                ImportBinding(
+                    scope=self._scope(),
+                    local_name=local_name,
+                    canonical_name=canonical_name,
+                    kind="function",
+                    line=node.lineno,
+                )
+            )
 
     def visit_Global(self, node: ast.Global) -> None:
         for name in node.names:
@@ -353,6 +478,7 @@ class _StructureCollector(ast.NodeVisitor):
                 arguments=tuple(_argument_text(arg) for arg in node.args),
                 keywords=tuple(keywords),
                 scope=self._scope(),
+                sequence=self._take_sequence(),
             )
         )
 

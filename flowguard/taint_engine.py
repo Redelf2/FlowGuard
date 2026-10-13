@@ -13,15 +13,17 @@ Inside one scope, the engine walks assignments from top to bottom:
 A scope is the module body, one function body, or one class body. A name
 assigned in one function is not the same name in another function.
 
-This module does not report vulnerabilities. A tainted name reaching
-``print`` or ``subprocess.run`` is left for the next milestone.
+``apply_rules`` in ``rules.py`` uses the tainted names that are current
+when each call is reached. This module still does not decide that a
+flow is a vulnerability.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from flowguard.parser import Assignment, ParseResult
+from flowguard.aliases import resolve_alias
+from flowguard.parser import Assignment, FunctionCall, ParseResult
 from flowguard.rules import RULES
 
 _CLEAN = "clean"
@@ -106,38 +108,76 @@ def trace_assignments(parse_result: ParseResult) -> TaintResult:
     not a vulnerability report.
     """
 
-    # Step 1: Read the configured source calls. Do not keep a second copy.
-    sources = configured_sources()
+    # The final names ignore calls. Call order is handled in the same walk.
+    bindings_by_scope, _calls = _walk(parse_result)
+    return _result_from_bindings(bindings_by_scope)
 
-    # Step 2: Remember global and nonlocal names. Assignments to those names
-    # stay in the scope where they are written, and are marked unsupported.
+
+def tainted_names_at_calls(
+    parse_result: ParseResult,
+) -> tuple[tuple[FunctionCall, tuple[TaintedName, ...]], ...]:
+    """Return each call with the tainted names in its scope at that moment.
+
+    Assignments after the call do not affect it. A name cleared on a later
+    line can still have reached an earlier sink.
+    """
+
+    _bindings, calls = _walk(parse_result)
+    return tuple(calls)
+
+
+def _walk(
+    parse_result: ParseResult,
+) -> tuple[
+    dict[str, dict[str, _Binding]],
+    list[tuple[FunctionCall, tuple[TaintedName, ...]]],
+]:
+    """Replay assignments and calls in source order, one scope at a time."""
+
+    # Step 1: Read sources and whole-scope declarations such as global.
+    sources = configured_sources()
     declared: dict[str, dict[str, str]] = {}
     for declaration in parse_result.declarations:
         declared.setdefault(declaration.scope, {})[declaration.name] = declaration.kind
 
-    # Step 3: Walk each scope on its own, in source order.
-    grouped: dict[str, list[Assignment]] = {}
+    # Step 2: Interleave assignments and calls by the parser's sequence number.
+    events: list[tuple[int, str, Assignment | FunctionCall]] = []
     for assignment in parse_result.assignments:
-        grouped.setdefault(assignment.scope, []).append(assignment)
+        events.append((assignment.sequence, "assignment", assignment))
+    for call in parse_result.calls:
+        events.append((call.sequence, "call", call))
+    events.sort(key=lambda item: item[0])
+
+    # Step 3: Update only the scope that owns each event.
+    bindings_by_scope: dict[str, dict[str, _Binding]] = {}
+    calls: list[tuple[FunctionCall, tuple[TaintedName, ...]]] = []
+    for _sequence, kind, event in events:
+        scope_bindings = bindings_by_scope.setdefault(event.scope, {})
+        if kind == "assignment" and isinstance(event, Assignment):
+            _apply_assignment(
+                scope_bindings,
+                event,
+                sources,
+                declared.get(event.scope, {}),
+                parse_result,
+            )
+            continue
+        if isinstance(event, FunctionCall):
+            calls.append((event, _tainted_snapshot(event.scope, scope_bindings)))
+    return bindings_by_scope, calls
+
+
+def _result_from_bindings(
+    bindings_by_scope: dict[str, dict[str, _Binding]],
+) -> TaintResult:
+    """Keep the final tainted and unsupported names. Omit clean names."""
 
     tainted: list[TaintedName] = []
     unsupported: list[UnsupportedName] = []
-    for scope, assignments in grouped.items():
-        bindings: dict[str, _Binding] = {}
-        for assignment in assignments:
-            _apply_assignment(bindings, assignment, sources, declared.get(scope, {}))
+    for scope, bindings in bindings_by_scope.items():
         for name, binding in bindings.items():
             if binding.status == _TAINTED:
-                tainted.append(
-                    TaintedName(
-                        scope=scope,
-                        name=name,
-                        source=binding.source,
-                        source_line=binding.source_line,
-                        line=binding.line,
-                        path=binding.path,
-                    )
-                )
+                tainted.append(_tainted_name(scope, name, binding))
             elif binding.status == _UNSUPPORTED:
                 unsupported.append(
                     UnsupportedName(
@@ -147,9 +187,30 @@ def trace_assignments(parse_result: ParseResult) -> TaintResult:
                         reason=binding.reason,
                     )
                 )
-
-    # Step 4: Return the final names. Clean names are omitted on purpose.
     return TaintResult(tainted=tuple(tainted), unsupported=tuple(unsupported))
+
+
+def _tainted_snapshot(
+    scope: str,
+    bindings: dict[str, _Binding],
+) -> tuple[TaintedName, ...]:
+    names = [
+        _tainted_name(scope, name, binding)
+        for name, binding in bindings.items()
+        if binding.status == _TAINTED
+    ]
+    return tuple(names)
+
+
+def _tainted_name(scope: str, name: str, binding: _Binding) -> TaintedName:
+    return TaintedName(
+        scope=scope,
+        name=name,
+        source=binding.source,
+        source_line=binding.source_line,
+        line=binding.line,
+        path=binding.path,
+    )
 
 
 def _apply_assignment(
@@ -157,6 +218,7 @@ def _apply_assignment(
     assignment: Assignment,
     sources: frozenset[str],
     declared_names: dict[str, str],
+    parsed: ParseResult,
 ) -> None:
     """Replace or update one name from a single assignment."""
 
@@ -175,7 +237,7 @@ def _apply_assignment(
     # Step 2: += keeps the old value and mixes in the right-hand side.
     if assignment.value_kind == "augassign":
         bindings[assignment.target] = _apply_augmented(
-            bindings, assignment, sources
+            bindings, assignment, sources, parsed
         )
         return
 
@@ -187,6 +249,8 @@ def _apply_assignment(
         value_kind=assignment.value_kind,
         value_repr=assignment.value_repr,
         sources=sources,
+        scope=assignment.scope,
+        parsed=parsed,
     )
 
 
@@ -194,6 +258,7 @@ def _apply_augmented(
     bindings: dict[str, _Binding],
     assignment: Assignment,
     sources: frozenset[str],
+    parsed: ParseResult,
 ) -> _Binding:
     """Combine ``name += value`` with the name's current binding."""
 
@@ -205,6 +270,8 @@ def _apply_augmented(
         value_kind=assignment.operand_kind or "other",
         value_repr=assignment.value_repr,
         sources=sources,
+        scope=assignment.scope,
+        parsed=parsed,
     )
 
     # An earlier source still wins when both sides are tainted.
@@ -234,13 +301,20 @@ def _binding_from_value(
     value_kind: str,
     value_repr: str,
     sources: frozenset[str],
+    scope: str,
+    parsed: ParseResult,
 ) -> _Binding:
     """Classify one right-hand side. Callers store the result on ``target``."""
 
-    if value_kind == "call" and value_repr in sources:
+    # An import alias such as getenv can mean os.getenv. The written name stays
+    # in the parser output; only this check uses the resolved source.
+    called_name = value_repr
+    if value_kind == "call":
+        called_name = resolve_alias(parsed, scope, value_repr)
+    if value_kind == "call" and called_name in sources:
         return _Binding(
             status=_TAINTED,
-            source=value_repr,
+            source=called_name,
             source_line=line,
             line=line,
             path=(target,),

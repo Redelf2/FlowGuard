@@ -1,8 +1,7 @@
-"""Format the facts produced by the parser.
+"""Format parser facts and potential security findings.
 
-Milestone 1 reports what was parsed. It deliberately does not include an
-empty findings list. An empty list would look like "this file is safe", and
-this version does not make that decision.
+An empty findings list means no tracked tainted value reached a configured
+sink. It does not mean the file is safe. Unsupported values are omitted.
 """
 
 from __future__ import annotations
@@ -12,8 +11,13 @@ from dataclasses import asdict
 
 from flowguard import __version__
 from flowguard.parser import Assignment, FunctionCall, ParseResult
+from flowguard.rules import Finding, apply_rules
 
-_FINDINGS_NOT_CHECKED = "Security findings: not checked yet."
+_NOT_A_PROOF = (
+    "A finding is a potential risk on a tracked path. "
+    "Unsupported values are omitted. "
+    "This is not proof that the file is safe or that a finding is exploitable."
+)
 
 
 def format_parse_report(result: ParseResult, output_format: str = "text") -> str:
@@ -23,27 +27,31 @@ def format_parse_report(result: ParseResult, output_format: str = "text") -> str
     if output_format not in {"text", "json"}:
         raise ValueError("format must be 'text' or 'json'")
 
-    # Step 2: JSON is for later scripts. It repeats the parser facts and
-    # states that security analysis did not run.
+    # Step 2: Apply the configured rules. An empty tuple is a real result.
+    findings = apply_rules(result)
+
+    # Step 3: JSON is for later scripts. It repeats the parser facts and findings.
     if output_format == "json":
         payload = {
             "tool": "flowguard",
             "version": __version__,
             "file": result.path,
-            "analysis": "not_implemented",
-            "message": _FINDINGS_NOT_CHECKED,
+            "analysis": "completed",
+            "message": _NOT_A_PROOF,
             "assignments": [_assignment_payload(item) for item in result.assignments],
             "calls": [_call_payload(call) for call in result.calls],
+            "findings": [finding.to_dict() for finding in findings],
         }
         return json.dumps(payload, indent=2) + "\n"
 
-    # Step 3: Text is the form a person reads in the terminal.
+    # Step 4: Text is the form a person reads in the terminal.
     lines = [
         "FlowGuard",
         f"File: {result.path}",
         f"Parsed assignments: {len(result.assignments)}",
         f"Parsed function calls: {len(result.calls)}",
-        _FINDINGS_NOT_CHECKED,
+        f"Security findings: {len(findings)}",
+        _NOT_A_PROOF,
         "",
         "Assignments:",
     ]
@@ -63,7 +71,42 @@ def format_parse_report(result: ParseResult, output_format: str = "text") -> str
     else:
         lines.append("  (none)")
 
+    lines.extend(["", _format_findings(findings)])
     return "\n".join(lines) + "\n"
+
+
+def _format_findings(findings: tuple[Finding, ...]) -> str:
+    if not findings:
+        return (
+            "Findings:\n"
+            "  (none)\n"
+            "  No configured sink received a tracked tainted value."
+        )
+    blocks = ["Findings:"]
+    for finding in findings:
+        blocks.append(
+            "\n".join(
+                [
+                    "",
+                    f"[{finding.severity.upper()}] {finding.rule_id} {finding.title}",
+                    f"File: {finding.file}",
+                    f"Source: {finding.source} at line {finding.source_line}",
+                    f"Data flow: {finding.flow_text()}",
+                    f"Destination: {finding.sink} at line {finding.sink_line}",
+                    f"Confidence: {finding.confidence}",
+                    "",
+                    "Reason:",
+                    finding.explanation,
+                    "",
+                    "Recommendation:",
+                    finding.recommended_fix,
+                    "",
+                    "Limitation:",
+                    finding.limitation,
+                ]
+            )
+        )
+    return "\n".join(blocks)
 
 
 def _assignment_payload(assignment: Assignment) -> dict[str, object]:

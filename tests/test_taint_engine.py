@@ -52,15 +52,45 @@ class DirectSourceTests(unittest.TestCase):
 
         self.assertEqual(_must_bind(result, MODULE, "user_input").source, "input")
 
-    def test_import_alias_is_not_treated_as_os_getenv(self) -> None:
+    def test_from_os_import_getenv_is_the_configured_source(self) -> None:
         source = "from os import getenv\nsecret = getenv('API_KEY')\n"
+        result = _trace(source)
+        binding = result.tainted_binding(MODULE, "secret")
+
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertEqual(binding.source, "os.getenv")
+
+    def test_renamed_getenv_import_is_the_configured_source(self) -> None:
+        source = "from os import getenv as read_env\nsecret = read_env('API_KEY')\n"
+        result = _trace(source)
+
+        self.assertEqual(_must_bind(result, MODULE, "secret").source, "os.getenv")
+
+    def test_getenv_imported_from_another_module_is_not_os_getenv(self) -> None:
+        source = "from helpers import getenv\nsecret = getenv('API_KEY')\n"
         result = _trace(source)
 
         self.assertFalse(result.is_tainted(MODULE, "secret"))
-        reason = result.unsupported_reason(MODULE, "secret")
-        self.assertIsNotNone(reason)
-        assert reason is not None
-        self.assertIn("getenv", reason)
+
+    def test_local_function_named_getenv_hides_the_import(self) -> None:
+        source = "\n".join(
+            [
+                "from os import getenv",
+                "def getenv(name):",
+                "    return name",
+                "secret = getenv('API_KEY')",
+            ]
+        )
+        result = _trace(source)
+
+        self.assertFalse(result.is_tainted(MODULE, "secret"))
+
+    def test_import_os_as_alias_resolves_getenv(self) -> None:
+        source = "import os as os_module\nsecret = os_module.getenv('API_KEY')\n"
+        result = _trace(source)
+
+        self.assertEqual(_must_bind(result, MODULE, "secret").source, "os.getenv")
 
 
 class AliasTests(unittest.TestCase):
@@ -294,7 +324,7 @@ class UnsupportedTests(unittest.TestCase):
 
 
 class SampleTests(unittest.TestCase):
-    def test_secret_sample_links_backup_without_a_finding(self) -> None:
+    def test_secret_sample_links_backup_to_the_getenv_source(self) -> None:
         result = trace_assignments(parse_file(SAMPLES / "vulnerable_secret.py"))
         backup = result.tainted_binding(MODULE, "backup")
 

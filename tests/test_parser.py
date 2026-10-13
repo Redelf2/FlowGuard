@@ -169,6 +169,15 @@ class ParseSourceTests(unittest.TestCase):
         self.assertEqual(result.assignments[0].operand_kind, "call")
         self.assertEqual(result.assignments[0].value_repr, "input")
 
+    def test_from_import_keeps_the_written_call_name(self) -> None:
+        source = "from os import getenv as read_env\nsecret = read_env('API_KEY')\n"
+        result = parse_source(source)
+
+        self.assertEqual(result.calls[0].name, "read_env")
+        self.assertEqual(result.assignments[0].value_repr, "read_env")
+        self.assertEqual(result.imports[0].local_name, "read_env")
+        self.assertEqual(result.imports[0].canonical_name, "os.getenv")
+
     def test_syntax_error_includes_the_line_number(self) -> None:
         with self.assertRaises(FlowGuardSyntaxError) as caught:
             parse_source("x = 1\ny = (\n", path="bad.py")
@@ -246,24 +255,31 @@ class ParseFileTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    def test_text_report_says_analysis_is_not_implemented(self) -> None:
+    def test_text_report_includes_the_secret_finding(self) -> None:
         completed = _run_cli(SAMPLES / "vulnerable_secret.py")
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("Security findings: not checked yet.", completed.stdout)
-        self.assertNotIn("Taint analysis is not implemented yet.", completed.stdout)
+        self.assertIn("[MEDIUM] FG001 Potential sensitive-data exposure", completed.stdout)
+        self.assertIn("Data flow: secret -> backup -> print", completed.stdout)
         self.assertIn("backup = secret (name)", completed.stdout)
+        self.assertNotIn("not checked yet", completed.stdout)
         self.assertEqual(completed.stderr, "")
 
-    def test_json_report_has_no_findings_list(self) -> None:
+    def test_json_report_includes_the_command_finding(self) -> None:
         completed = _run_cli(SAMPLES / "vulnerable_command.py", "--format", "json")
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
-        self.assertEqual(payload["analysis"], "not_implemented")
-        self.assertNotIn("findings", payload)
+        self.assertEqual(payload["analysis"], "completed")
         self.assertEqual(payload["calls"][1]["name"], "subprocess.run")
         self.assertEqual(payload["calls"][1]["keywords"][0]["name"], "shell")
+        self.assertEqual(len(payload["findings"]), 1)
+        finding = payload["findings"][0]
+        self.assertEqual(finding["rule_id"], "FG002")
+        self.assertEqual(finding["severity"], "high")
+        self.assertEqual(finding["path"], ["user_input", "subprocess.run"])
+        self.assertEqual(finding["confidence"], "increased")
+        self.assertIn("shell=True", finding["explanation"])
 
     def test_missing_file_exits_with_code_2(self) -> None:
         completed = _run_cli(SAMPLES / "does_not_exist.py")
